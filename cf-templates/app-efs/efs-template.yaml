@@ -1,0 +1,183 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: |
+  EFS Stack - Creates EFS instance and networking resources for a serverless ML application.
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: The ID of the VPC where EFS and Lambda will be deployed.
+    Default: ""
+  PublicSubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: The ID of a public subnet within the VPC for EFS mount targets for lambdas in the public subnet.
+    Default: ""
+  SubnetCidr:
+    Type: String
+    Description: CIDR block for the new private subnet (e.g. 10.0.2.0/24)
+    Default: ""
+
+Resources:
+
+  ## Security Groups
+  
+  ReadWriteSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: ReadWriteMlEfsSecurityGroup
+      GroupDescription: Security group for outgoing EFS connections
+      VpcId: !Ref VpcId
+
+  LambdaPublicSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: ReadMlEfsSecurityGroup
+      GroupDescription: Security group for EFS mount targets, allowing NFS traffic
+      VpcId: !Ref VpcId
+
+  EFSIngressRule:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref LambdaPublicSecurityGroup
+      SourceSecurityGroupId: !GetAtt ReadWriteSecurityGroup.GroupId
+      IpProtocol: tcp
+      FromPort: 2049
+      ToPort: 2049
+      Description: Allow NFS traffic from Lambda function
+
+  LambdaEgressRule:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref ReadWriteSecurityGroup
+      DestinationSecurityGroupId: !GetAtt LambdaPublicSecurityGroup.GroupId
+      IpProtocol: tcp
+      FromPort: 2049
+      ToPort: 2049
+      Description: Allow Lambda to connect to EFS
+
+  HfHubLambdaOutboundRule:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref ReadWriteSecurityGroup
+      IpProtocol: -1
+      CidrIp: 0.0.0.0/0
+      Description: Allow all outbound traffic
+
+  ## Subnets (additional private) and NAT GateWay for Lambda outbound internet access
+  
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VpcId
+      CidrBlock: !Ref SubnetCidr
+      AvailabilityZone: !Select [ 2, !GetAZs '' ]
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VpcId
+
+  PrivateSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateNatRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !GetAtt NatGateway.NatGatewayId
+  
+  NatGatewayEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGatewayEIP.AllocationId
+      SubnetId: !Ref PublicSubnetId
+
+  ## EFS instance
+  
+  MlEfs:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      Encrypted: true
+      PerformanceMode: generalPurpose
+      ThroughputMode: bursting
+
+  LambdaAccessTargetPrivate:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref MlEfs
+      SubnetId: !Ref PrivateSubnet
+      SecurityGroups:
+        - !Ref LambdaPublicSecurityGroup
+
+  ReadWriteMlEfsLambdaAccessPoint:
+    Type: AWS::EFS::AccessPoint
+    Properties:
+      FileSystemId: !Ref MlEfs
+      PosixUser:
+        Uid: '1000'
+        Gid: '1000'
+      RootDirectory:
+        Path: /models
+        CreationInfo:
+          OwnerUid: '1000'
+          OwnerGid: '1000'
+          Permissions: '0755'
+
+  ReadLambdaAccessPoint:
+    Type: AWS::EFS::AccessPoint
+    Properties:
+      FileSystemId: !Ref MlEfs
+      PosixUser:
+        Uid: '1000'
+        Gid: '1000'
+      RootDirectory:
+        Path: /models
+        CreationInfo:
+          OwnerUid: '1000'
+          OwnerGid: '1000'
+          Permissions: '0666'
+
+Outputs:
+  MlEfsId:
+    Description: The ID of the EFS File System.
+    Value: !Ref MlEfs
+    Export:
+      Name: MlEfsId
+  ReadWriteAccessPointArn:
+    Description: The ARN of the EFS Access Point for ReadWriteMlEfs Lambda Access (rw).
+    Value: !GetAtt ReadWriteMlEfsLambdaAccessPoint.Arn
+    Export:
+      Name: ReadWriteAccessPointArn
+  ReadAccessPointArn:
+    Description: The ARN of the EFS Access Point for Prod Lambda Access (r).
+    Value: !GetAtt ReadLambdaAccessPoint.Arn
+    Export:
+      Name: ReadAccessPointArn
+  PrivateSubnetId:
+    Description: The private subnet Id where the ML EFS instances is
+    Value: !Ref PrivateSubnet
+    Export:
+      Name: PrivateSubnetId
+  PublicSubnetId:
+    Description: The public subnet Id created for NAT Gateway
+    Value: !Ref PublicSubnetId
+    Export:
+      Name: PublicSubnetId
+  LambdaPublicSecurityGroupId:
+    Description: Security group for EFS mount targets, allowing NFS traffic
+    Value: !GetAtt LambdaPublicSecurityGroup.GroupId
+    Export:
+      Name: EfsSecurityGroupId
+  ReadWriteSecurityGroupId:
+    Description: Id of the security group for S3 EFS ReadWrite function
+    Value: !GetAtt ReadWriteSecurityGroup.GroupId
+    Export:
+      Name: ReadWriteSecurityGroupId
