@@ -1,0 +1,359 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  spend-analyzer
+
+  SAM Template for spend-analyzer
+
+Globals:
+  Function:
+    Architectures:
+      - arm64
+
+Parameters:
+  HostedZoneId:
+    Type: String
+    Description: The ID of your Route 53 Hosted Zone
+  DomainName:
+    Type: String
+    Description: "The FQDN custom subdomain (e.g. app.example.com)"
+  ApiDomainName:
+    Type: String
+    Description: "API FQDN for the API (e.g. api.example.com)."
+  
+Resources:
+
+  ## Functions
+
+  ClassifyTransactionsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      FunctionName: ClassifyTransactionsFunction
+      Environment:
+        Variables:
+          USER_DATA_BUCKET: !Ref UserDataBucket
+      Description: Real time inference handler for classifying transaction descriptions using SFT BERT model
+      MemorySize: 3008
+      Timeout: 900
+      Policies:
+        - AWSLambdaVPCAccessExecutionRole
+        - Statement:
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:ListBucket
+            Resource: 
+              - !Sub "arn:aws:s3:::${UserDataBucket}"
+              - !Sub "arn:aws:s3:::${UserDataBucket}/*"
+      Events:
+        ClassifyTransactions:
+          Type: Api
+          Properties:
+            RestApiId: !Ref SpendAnalyzerApi
+            Path: /classify_transactions
+            Method: POST
+            TimeoutInMillis: 29000
+            Auth:
+              Authorizer: CognitoAuthorizer
+    Metadata:
+      Dockerfile: Dockerfile
+      DockerContext: ./classify_transactions
+      DockerTag: v0.1.0
+
+  PostConfirmationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: PostConfirmationFunction
+      Description: Post confirmation trigger for Cognito user signup, creates user data directory in S3
+      CodeUri: auth/post_confirmation/
+      Runtime: python3.13
+      Handler: main.handler
+      Environment:
+        Variables:
+          USER_DATA_BUCKET: !Ref UserDataBucket
+      Policies:
+        - Statement:
+          - Effect: Allow
+            Action:
+              - s3:PutObject
+            Resource: !Sub "arn:aws:s3:::${UserDataBucket}/*"
+  
+  PostConfirmationInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref PostConfirmationFunction
+      Action: lambda:InvokeFunction
+      Principal: cognito-idp.amazonaws.com
+      SourceArn: !GetAtt SpendAnalyzerUserPool.Arn
+  
+  ## User data storage Bucket
+
+  UserDataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  ## API
+
+  SpendAnalyzerApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: dev
+      Auth:
+        DefaultAuthorizer: CognitoAuthorizer
+        # Preflight OPTIONS does not require authentication (browsers do not included credentials)
+        AddDefaultAuthorizerToCorsPreflight: False
+        Authorizers:
+          CognitoAuthorizer:
+            UserPoolArn: !GetAtt SpendAnalyzerUserPool.Arn
+      Cors:
+        AllowOrigin: !Sub "'https://${DomainName}'"
+        AllowHeaders: !Sub "'Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Amz-Security-Token,X-Amz-User-Agent'"
+        AllowMethods: !Sub "'OPTIONS,GET,POST,PUT,DELETE,HEAD'"
+        AllowCredentials: false
+      # Ensure 4xx/5xx errors also return CORS headers. Set the Authorization to NONE for OPTIONS method.
+      GatewayResponses:
+        DEFAULT_4XX:
+          ResponseParameters:
+            Headers:
+              Access-Control-Allow-Origin: !Sub "'https://${DomainName}'"
+              Access-Control-Allow-Headers: "'Content-Type,Authorization'"
+              Access-Control-Allow-Methods: "'OPTIONS,GET,POST,PUT,DELETE'"
+        DEFAULT_5XX:
+          ResponseParameters:
+            Headers:
+              Access-Control-Allow-Origin: !Sub "'https://${DomainName}'"
+              Access-Control-Allow-Headers: "'Content-Type,Authorization'"
+              Access-Control-Allow-Methods: "'OPTIONS,GET,POST,PUT,DELETE'"
+      DefinitionBody:
+        openapi: "3.0.1"
+        paths:
+          /classify_transactions:
+            # POST fire and forget pattern
+            post:
+              # Method Response
+              responses:
+                '202':
+                  description: "Accepted"
+                  headers:
+                    Access-Control-Allow-Origin:
+                      type: "string"
+                    Access-Control-Allow-Methods:
+                      type: "string"
+                    Access-Control-Allow-Headers:
+                      type: "string"
+              # Integration Request
+              x-amazon-apigateway-integration:
+                type: "aws"
+                httpMethod: "POST"
+                requestParameters:
+                  integration.request.header.X-Amz-Invocation-Type: "'Event'"
+                requestTemplates:
+                  application/json: |
+                    #set($queryMap = $input.params().querystring)
+                    {
+                      "username": "$context.authorizer.claims['cognito:username']",
+                      "queryStringParameters": {
+                        #foreach($key in $queryMap.keySet())
+                        "$key": "$util.escapeJavaScript($queryMap.get($key))"
+                        #if($foreach.hasNext),#end
+                        #end
+                      },
+                      "body": $input.json('$')
+                    }
+                uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ClassifyTransactionsFunction.Arn}/invocations"
+                responses:
+                  default:
+                    statusCode: "202"
+                    responseParameters:
+                      method.response.header.Access-Control-Allow-Origin: !Sub "'https://${DomainName}'"
+                      method.response.header.Access-Control-Allow-Methods: "'OPTIONS,POST'"
+                      method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization'"
+                passthroughBehavior: "when_no_match"
+
+  ## User Authentication
+
+  SpendAnalyzerUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: SpendAnalyzerUserPool
+      LambdaConfig:
+        PostConfirmation: !GetAtt PostConfirmationFunction.Arn
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+      AutoVerifiedAttributes:
+        - email
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Mutable: true
+          Required: true
+
+  SpendAnalyzerUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: SpendAnalyzerClient
+      GenerateSecret: false
+      UserPoolId: !Ref SpendAnalyzerUserPool
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+
+  ## Frontend App Infrastructure 
+
+  FrontendOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Description: "OAC for Spend Analyzer"
+        Name: !Sub "${AWS::StackName}-OAC"
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+  
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub "arn:aws:s3:::${FrontendBucket}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${FrontendDistribution}"
+
+  FrontendDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Aliases:
+          - !Ref DomainName
+        ViewerCertificate:
+          AcmCertificateArn: !Ref WebsiteCertificate
+          SslSupportMethod: sni-only
+          MinimumProtocolVersion: TLSv1.2_2021
+        DefaultRootObject: index.html
+        Origins:
+          - DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            Id: S3Origin
+            OriginAccessControlId: !GetAtt FrontendOAC.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          CachedMethods: [GET, HEAD, OPTIONS]
+          ForwardedValues:
+            QueryString: false
+            Cookies:
+              Forward: none
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+
+  ## API Custom Domain and Mapping
+
+  ApiCertificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Ref ApiDomainName
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Ref ApiDomainName
+          HostedZoneId: !Ref HostedZoneId
+
+  SpendAnalyzerApiDomainName:
+    Type: AWS::ApiGateway::DomainName
+    Properties:
+      DomainName: !Ref ApiDomainName
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+      RegionalCertificateArn: !Ref ApiCertificate
+
+  SpendAnalyzerApiBasePathMapping:
+    Type: AWS::ApiGateway::BasePathMapping
+    Properties:
+      DomainName: !Ref SpendAnalyzerApiDomainName
+      RestApiId: !Ref SpendAnalyzerApi
+      Stage: dev
+
+  SpendAnalyzerApiDNSRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref ApiDomainName
+      Type: A
+      AliasTarget:
+        HostedZoneId: !GetAtt SpendAnalyzerApiDomainName.RegionalHostedZoneId
+        DNSName: !GetAtt SpendAnalyzerApiDomainName.RegionalDomainName
+
+  WebsiteCertificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Ref DomainName
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Ref DomainName
+          HostedZoneId: !Ref HostedZoneId
+
+  DNSRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref DomainName
+      Type: A
+      AliasTarget:
+        # The CloudFront Hosted Zone ID is global and always Z2FDTNDATAQYW2
+        HostedZoneId: Z2FDTNDATAQYW2
+        DNSName: !GetAtt FrontendDistribution.DomainName
+
+Outputs:
+  FrontendLoginUrl:
+    Description: "Custom Domain URL"
+    Value: !Sub "https://${DomainName}/login"
+  FrontendUrl:
+    Description: "URL of the Frontend"
+    Value: !Sub "https://${FrontendDistribution.DomainName}"
+  FrontendBucketName:
+    Description: "Name of the Frontend S3 Bucket"
+    Value: !Ref FrontendBucket
+  UserDataBucketName:
+    Description: "Name of the User Data S3 Bucket"
+    Value: !Ref UserDataBucket
+  SpendAnalyzerApiBase:
+    Description: "API Gateway base URL for the SpendAnalyzer API (stage=dev)"
+    Value: !Sub "https://${ApiDomainName}"
+  SpendAnalyzerUserPoolId:
+    Description: "ID of the User Pool"
+    Value: !Ref SpendAnalyzerUserPool
+  SpendAnalyzerUserPoolClientId:
+    Description: "ID of the User Pool Client"
+    Value: !Ref SpendAnalyzerUserPoolClient

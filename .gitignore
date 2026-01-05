@@ -209,8 +209,12 @@ __marimo__/
 ## macos
 .DS_Store
 
+## VSCode
+.vscode/
+
 ## AWS SAM
 .aws-sam/
+samconfig.toml
 
 ## CloudFormation
 *-parameters.json
@@ -224,3 +228,9 @@ tmp
 temp
 .tmp
 .temp
+
+## Amplify conf
+amplifyconfiguration.json
+
+## Lambda Function model files
+spend-analyzer/classify_transactions/model
