@@ -26,8 +26,8 @@ device = torch.device("cpu")
 print(f"Using device: {device}")
 
 try:
-    # START TIMING
-    start_time = time.perf_counter()
+    # START TIMING: Model Load
+    load_start_time = time.perf_counter()
 
     config_path = os.path.join(CACHE_DIR, "config.json")
     if not os.path.exists(config_path):
@@ -63,9 +63,9 @@ try:
         print("Could not load tokenizer from CACHE_DIR, attempting standard load (may fail without internet)")
         tokenizer = BertTokenizer.from_pretrained("google-bert/bert-base-uncased")
 
-    # END TIMING
+    # END TIMING: Model Load
     end_time = time.perf_counter()
-    execution_time = end_time - start_time
+    execution_time = end_time - load_start_time
     print(f"Total model load time: {execution_time:.4f} seconds")
     print("Model and Tokenizer loaded successfully.")
 
@@ -108,7 +108,7 @@ class InferenceDataset(Dataset):
 
 
 def handler(event, context):
-
+    print("Inference Status: started...")
     if model is None or tokenizer is None:
         raise Exception("Model or tokenizer not initialized")
     
@@ -149,10 +149,10 @@ def handler(event, context):
         )
         dataloader = DataLoader(dataset, batch_size=32, shuffle=False)
 
-        print("Inference Status: started...")
-
         result_df = pd.DataFrame(columns=["Transaction Description", "Predicted Category", "Confidence Score"])
 
+        # START TIMING: Inference
+        inference_start_time = time.perf_counter()
         with torch.no_grad():
             for batch in dataloader:
 
@@ -188,6 +188,10 @@ def handler(event, context):
                         "Confidence Score": [confidence]
                     })], ignore_index=True)            
 
+        # END TIMING: Inference
+        end_time = time.perf_counter()
+        execution_time = end_time - inference_start_time
+        print(f"Total inference time: {execution_time:.4f} seconds")
         print("Inference Status: completed")
 
         # Write results to configured user data bucket

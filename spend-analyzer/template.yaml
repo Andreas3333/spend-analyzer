@@ -9,6 +9,7 @@ Globals:
   Function:
     Architectures:
       - arm64
+    ReservedConcurrentExecutions: 5
 
 Parameters:
   HostedZoneId:
@@ -34,7 +35,7 @@ Resources:
         Variables:
           USER_DATA_BUCKET: !Ref UserDataBucket
       Description: Real time inference handler for classifying transaction descriptions using SFT BERT model
-      MemorySize: 3008
+      MemorySize: 10240
       Timeout: 900
       Policies:
         - AWSLambdaVPCAccessExecutionRole
@@ -105,6 +106,14 @@ Resources:
     Type: AWS::Serverless::Api
     Properties:
       StageName: dev
+      MethodSettings:
+        # Low limits for the simple spend-analyzer app
+        - ResourcePath: "/*"
+          HttpMethod: "*"
+          ThrottlingRateLimit: 5
+          ThrottlingBurstLimit: 5
+          LoggingLevel: INFO
+          MetricsEnabled: True
       Auth:
         DefaultAuthorizer: CognitoAuthorizer
         # Preflight OPTIONS does not require authentication (browsers do not included credentials)
@@ -177,7 +186,7 @@ Resources:
                       method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization'"
                 passthroughBehavior: "when_no_match"
 
-  ## User Authentication
+  ## User Authentication and Web ACL for API with Managed Rules
 
   SpendAnalyzerUserPool:
     Type: AWS::Cognito::UserPool
@@ -205,6 +214,40 @@ Resources:
       ExplicitAuthFlows:
         - ALLOW_USER_SRP_AUTH
         - ALLOW_REFRESH_TOKEN_AUTH
+
+  ApiWebACL:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: SpendAnalyzerApiWebACL
+      Scope: REGIONAL
+      DefaultAction:
+        Allow: {}
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: SpendAnalyzerApiWebACLMetric
+      Rules:
+        - Name: AWS-AWSManagedRulesCommonRuleSet
+          Priority: 0
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+          OverrideAction:
+            None: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWSManagedRulesCommonRuleSetMetric
+
+  ApiWebACLAssociation:
+    Type: AWS::WAFv2::WebACLAssociation
+    Properties:
+      WebACLArn: !GetAtt ApiWebACL.Arn
+      ResourceArn: !Sub "arn:aws:apigateway:${AWS::Region}::/restapis/${SpendAnalyzerApi}/stages/dev"
+    DependsOn:
+      - SpendAnalyzerApidevStage
+
 
   ## Frontend App Infrastructure 
 
@@ -300,6 +343,10 @@ Resources:
 
   SpendAnalyzerApiBasePathMapping:
     Type: AWS::ApiGateway::BasePathMapping
+    DependsOn:
+      - SpendAnalyzerApidevStage
+      - SpendAnalyzerApiDomainName
+      - ApiWebACLAssociation
     Properties:
       DomainName: !Ref SpendAnalyzerApiDomainName
       RestApiId: !Ref SpendAnalyzerApi
