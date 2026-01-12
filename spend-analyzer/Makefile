@@ -6,7 +6,6 @@ help:
 
 .PHONY: deploy build-frontend deploy-sam sync-to-s3 invalidate-cloudfront
 
-
 deploy: download-model build-sam deploy-sam write-amplify-config write-api-url build-frontend sync-to-s3 invalidate-cloudfront ## Deploy the spend-analyzer app
 push-frontend: write-amplify-config write-api-url build-frontend sync-to-s3 invalidate-cloudfront ## Build and push frontend package to S3 Bucket
 
@@ -27,22 +26,25 @@ deploy-sam:
 	@echo "Deploying SAM..."
 	sam deploy $(SAM_ARGS)
 
-# Write amplifyconfiguration for frontend app build
+# Write amplifyconfiguration.json for frontend app build
 write-amplify-config:
 	@echo "Writing values to amplifyconfiguration.json..."
 	$(eval AWS_REGION := $(shell aws configure get region 2>/dev/null || echo us-east-1))
 	$(eval COGNITO_USER_POOL_ID := $(shell aws cloudformation describe-stacks --stack-name spend-analyzer --query "Stacks[0].Outputs[?OutputKey=='SpendAnalyzerUserPoolId'].OutputValue" --output text))
 	@if [ -z "$(COGNITO_USER_POOL_ID)" ] || [ "$(COGNITO_USER_POOL_ID)" = "None" ]; then echo "ERROR: UserPoolId not found" && exit 1; fi
-	
+
+	$(eval COGNITO_IDENTITY_POOL_ID := $(shell aws cloudformation describe-stacks --stack-name spend-analyzer --query "Stacks[0].Outputs[?OutputKey=='SpendAnalyzerIdentityPoolId'].OutputValue" --output text))
+	@if [ -z "$(COGNITO_IDENTITY_POOL_ID)" ] || [ "$(COGNITO_IDENTITY_POOL_ID)" = "None" ]; then echo "ERROR: IdentityPoolId not found" && exit 1; fi
+
 	$(eval COGNITO_USER_POOL_CLIENT_ID := $(shell aws cloudformation describe-stacks --stack-name spend-analyzer --query "Stacks[0].Outputs[?OutputKey=='SpendAnalyzerUserPoolClientId'].OutputValue" --output text))
 	@if [ -z "$(COGNITO_USER_POOL_CLIENT_ID)" ] || [ "$(COGNITO_USER_POOL_CLIENT_ID)" = "None" ]; then echo "ERROR: UserPoolClientId not found" && exit 1; fi
 
 	$(eval S3_USER_DATA_BUCKET_NAME := $(shell aws cloudformation describe-stacks --stack-name spend-analyzer --query "Stacks[0].Outputs[?OutputKey=='UserDataBucketName'].OutputValue" --output text))
-	@if [ -z "$(COGNITO_USER_POOL_CLIENT_ID)" ] || [ "$(COGNITO_USER_POOL_CLIENT_ID)" = "None" ]; then echo "ERROR: UserPoolClientId not found" && exit 1; fi
-	@echo "Generating frontend/src/amplifyconfiguration.json..."
+	@if [ -z "$(S3_USER_DATA_BUCKET_NAME)" ] || [ "$(S3_USER_DATA_BUCKET_NAME)" = "None" ]; then echo "ERROR: UserDataS3BucketName not found" && exit 1; fi
 	@printf '{\n\
 		"aws_project_region": "$(AWS_REGION)",\n\
 		"aws_cognito_region": "$(AWS_REGION)",\n\
+		"aws_cognito_identity_pool_id": "${COGNITO_IDENTITY_POOL_ID}",\n\
 		"aws_user_pools_id": "$(COGNITO_USER_POOL_ID)",\n\
 		"aws_user_pools_web_client_id": "$(COGNITO_USER_POOL_CLIENT_ID)",\n\
 		"oauth": {},\n\
@@ -54,7 +56,9 @@ write-amplify-config:
 			"passwordPolicyMinLength": 8,\n\
 			"passwordPolicyCharacters": []\n\
 		},\n\
-		"aws_cognito_verification_mechanisms": ["EMAIL"]\n\
+		"aws_cognito_verification_mechanisms": ["EMAIL"],\n\
+		"aws_user_files_s3_bucket": "${S3_USER_DATA_BUCKET_NAME}",\n\
+		"aws_user_files_s3_bucket_region": "${AWS_REGION}"\n\
 	}\n' > frontend/src/amplifyconfiguration.json
 
 # Write API URL for frontend app build
