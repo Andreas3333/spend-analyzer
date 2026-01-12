@@ -99,6 +99,26 @@ Resources:
         BlockPublicPolicy: true
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - "*"
+            AllowedMethods:
+              - GET
+              - PUT
+              - POST
+              - DELETE
+              - HEAD
+            AllowedOrigins:
+              - !Sub "https://${DomainName}"
+              # - "http://localhost:3000"  # only for development
+            ExposedHeaders:
+              - ETag
+              - x-amz-meta-custom-header
+              - x-amz-server-side-encryption
+              - x-amz-request-id
+              - x-amz-id-2
+            MaxAge: 3000
 
   ## API
 
@@ -214,6 +234,48 @@ Resources:
       ExplicitAuthFlows:
         - ALLOW_USER_SRP_AUTH
         - ALLOW_REFRESH_TOKEN_AUTH
+
+  SpendAnalyzerIdentityPool:
+    Type: AWS::Cognito::IdentityPool
+    Properties:
+      IdentityPoolName: SpendAnalyzerIdentityPool
+      AllowUnauthenticatedIdentities: false
+      CognitoIdentityProviders:
+        - ClientId: !Ref SpendAnalyzerUserPoolClient
+          ProviderName: !GetAtt SpendAnalyzerUserPool.ProviderName
+
+  IdentityPoolRoleAttachment:
+    Type: AWS::Cognito::IdentityPoolRoleAttachment
+    Properties:
+      IdentityPoolId: !Ref SpendAnalyzerIdentityPool
+      Roles:
+        authenticated: !GetAtt AuthenticatedRole.Arn
+
+  AuthenticatedRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: cognito-identity.amazonaws.com
+            Action:
+              - sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                cognito-identity.amazonaws.com:aud: !Ref SpendAnalyzerIdentityPool
+              'ForAnyValue:StringLike':
+                cognito-identity.amazonaws.com:amr: authenticated
+      Path: /
+      Policies:
+        - PolicyName: 'CognitoAuthenticatedPolicyAccessUserDataS3Bucket'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt UserDataBucket.Arn
 
   ApiWebACL:
     Type: AWS::WAFv2::WebACL
@@ -404,3 +466,6 @@ Outputs:
   SpendAnalyzerUserPoolClientId:
     Description: "ID of the User Pool Client"
     Value: !Ref SpendAnalyzerUserPoolClient
+  SpendAnalyzerIdentityPoolId:
+    Description: "ID of the Identity Pool"
+    Value: !Ref SpendAnalyzerIdentityPool

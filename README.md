@@ -6,7 +6,7 @@ A simple tool for analyzing spending by categorizing transaction data.
 
 <details>
 <summary>Prerequisites</summary>
-
+</p>
 Required:
 
 - An AWS Account

@@ -16,7 +16,6 @@ from safetensors.torch import load_model
 from cls_head import BertForSeqClassificationMLPHead, BertForSeqClassificationMLPHeadConfig
 
 import pandas as pd
-import s3fs
 
 
 CACHE_DIR = f"{os.getcwd()}/model/"
